@@ -1,0 +1,379 @@
+
+close all
+clear
+
+%% Parameters %%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+N       = 20;            % num bits per carrier per channel
+spb     = 48;           % symbols per bit
+kt      = 20;           % tail size
+A_bb    = 1;            % baseband amplitude
+
+% 
+% N_bersim       = 5;            % num bits per carrier per channel
+% spb_bersim     = 16;           % symbols per bit
+% kt_bersim      = ;           % tail size
+% A_bb_bersim    = 1;            % baseband amplitude
+
+num_carriers = 4;                   % number of carriers (non-ofdm)
+num_ofdm_carriers = 4;              
+B_chan = 10e3;                      % channel bandwidth
+B_carr = B_chan / num_carriers;     % bandwidth of single carrier (non-ofdm)
+B_carr_ofdm = 0;
+
+R               = B_carr/2*1.25;  % baseband single channel bit rate    
+Tb              = 1/R;          % bit time
+max_noise_var   = 5;
+
+fs = (1/(Tb/spb));
+
+center_freq = 10e3;             % channel center frequency
+f0 = center_freq - B_chan/2;    % the start of the range of channel
+fc0 = f0 + B_carr/2;            % first carrier frequency
+
+B_baseband = B_carr/2;
+r = 2*B_baseband/R - 1;      % rolloff factor
+
+pause_time = .02;
+
+% BER sim
+start_ebno = -40;
+end_ebno   = 20;
+delta_ebno = 1;
+avg_trials = 10;
+
+num_trials  = (end_ebno-start_ebno)/delta_ebno + 1;
+
+delta_spacing = 1;
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+spacing_idx = 1;
+total_ber_trials = zeros(4, num_trials);
+figure()
+for carr_spacing_numerator=10:-delta_spacing:2
+    spacing_factor = carr_spacing_numerator/10;
+    carr_spacing = B_carr * spacing_factor;
+    for noise_amplitude=0:max_noise_var
+        sgtitle([num2str(num_carriers) '-carrier QPSK Simulation, noise σ = ' num2str(noise_amplitude) ', carrier spacing = ' num2str(spacing_factor) 'B_{carrier} ']) 
+        % for i=0:1:max_noise_var
+        s_t_qpsk = 0;
+        [samp_m, samp_t, samp_ak, samp_bits] = form_baseband_rrcro(N, R, spb, kt, r, A_bb);
+        
+        bits_q = zeros(num_carriers, length(samp_bits));
+        bits_i = zeros(num_carriers, length(samp_bits));
+        mq_t = zeros(num_carriers, length(samp_bits));
+        mi_t = zeros(num_carriers, length(samp_bits));
+        
+        for cc_idx=1:num_carriers
+            fc = fc0 + (cc_idx-1)*carr_spacing;     %update for OFDM spacing
+            wc = 2*pi*fc;
+            % two different signals, random
+            [mq_t(cc_idx, :), t_q, ak_q, bits_q(cc_idx, :)] = form_baseband_rrcro(N, R, spb, kt, r, A_bb);
+            [mi_t(cc_idx, :), t_i, ak_i, bits_i(cc_idx, :)] = form_baseband_rrcro(N, R, spb, kt, r, A_bb);
+            
+            i_t  = Tb/spb; % multiplier for time to index
+            t_shift_idx = spb;
+            
+            rrcro_conv = r_rcro(kt, Tb, spb, r, 0);
+            rrcro_conv = rrcro_conv(end:-1:1);
+            
+            cos_func = cos(wc.*t_i + pi/2);
+            sin_func = sin(wc.*t_q + pi/2);
+        
+            s_t_qpsk = s_t_qpsk + (mi_t(cc_idx, :).*cos_func - mq_t(cc_idx, :).*sin_func);
+        end
+        
+        noise = randn(size(mq_t(1, :)));
+        
+        % plot modulated signal and received
+        subplot(4,3,3)
+        plot(t_q, s_t_qpsk)
+        xlabel('t')
+        ylabel('s(t)')
+        title('QPSK Modulated Signal')
+        
+        r_t = s_t_qpsk + noise_amplitude*noise;
+        
+        subplot(4,3,6)
+        plot(t_q, r_t)
+        xlabel('t')
+        ylabel('r(t)')
+        title(['Received Signal -- noise σ = ' num2str(noise_amplitude)])
+        
+        for cc_idx=1:num_carriers
+            subplot(4,3,1)
+            stem(t_q, bits_q(cc_idx, :))
+            xlabel('t')
+            ylabel('at')
+            title(['Bits transmitted (Q), carrier ' num2str(cc_idx)])
+            
+            subplot(4,3,4)
+            stem(t_q, bits_i(cc_idx, :))
+            xlabel('t')
+            ylabel('at')
+            title(['Bits transmitted (I), carrier ' num2str(cc_idx)])
+            
+            subplot(4,3,2)
+            plot(t_q, mq_t(cc_idx, :))
+            xlabel('t')
+            ylabel('m(t)')
+            title(['Baseband Signal (Q), carrier ' num2str(cc_idx)])
+            
+            subplot(4,3,5)
+            plot(t_q, mi_t(cc_idx, :))
+            xlabel('t')
+            ylabel('m(t)')
+            title(['Baseband Signal (I), carrier ' num2str(cc_idx)])
+            
+            % reconstructing the message signal
+            fc = fc0 + (cc_idx-1)*carr_spacing;     %update for OFDM spacing
+            wc = 2*pi*fc;
+        
+            cos_func = cos(wc.*t_i + pi/2);
+            sin_func = sin(wc.*t_q + pi/2);
+        
+            f_low = fc - carr_spacing/2;
+            f_high = fc + carr_spacing/2;
+            r_t_carr = bandpass(r_t, [f_low f_high], fs);
+        
+            r_t_i = r_t_carr .* cos_func;
+            r_t_i = conv(r_t_i, rrcro_conv, 'same');
+        
+            r_t_q = -r_t_carr .* sin_func;
+            r_t_q = conv(r_t_q, rrcro_conv, 'same');
+        
+            %%%%%%%%%%%%%%%%%%%%%%%%%%%%
+            % Plotting bit errors with received messages
+            % Q channel
+            bits_recovered = (abs(bits_q(cc_idx,:)).*r_t_q>0) + -1*(abs(bits_q(cc_idx,:)).*r_t_q<0);
+            bits_recovered(abs(bits_recovered)~=1) = nan;
+            bit_errors = sum(bits_q(cc_idx,:) ~= bits_recovered & ~isnan(bits_recovered));
+            
+            % locations of bit errors
+            error_bits = double(((bits_recovered~=bits_q(cc_idx,:)) & ~isnan(bits_recovered)));
+            error_locs = (abs(error_bits)==0);
+            error_bits(abs(error_bits)==0) = nan;
+        
+            subplot(4,3,8)
+            plot(t_q,r_t_q)
+            xlabel('t')
+            ylabel('r_Q(t)')
+            title(['Rx Message (Q), carrier ' num2str(cc_idx)])
+            hold on
+            plot(t_q, (bits_recovered).*abs(r_t_q), 'g*');
+            hold on
+            plot(t_q, error_bits.*(r_t_q), 'r*');
+            hold off
+            
+            % I channel
+            subplot(4,3,11)
+            bits_recovered = (abs(bits_i(cc_idx,:)).*r_t_i>0) + -1*(abs(bits_i(cc_idx,:)).*r_t_i<0);
+            bits_recovered(abs(bits_recovered)~=1) = nan;
+            bit_errors = sum(bits_i(cc_idx,:) ~= bits_recovered & ~isnan(bits_recovered));
+            
+            % locations of bit errors
+            error_bits = double(((bits_recovered~=bits_i(cc_idx,:)) & ~isnan(bits_recovered)));
+            error_locs = (abs(error_bits)==0);
+            error_bits(abs(error_bits)==0) = nan;
+            
+            plot(t_q,r_t_i)
+            xlabel('t')
+            ylabel('y(t)')
+            title(['Rx Message (I), carrier ' num2str(cc_idx)])
+            hold on
+            plot(t_q, (bits_recovered).*abs(r_t_i), 'g*');
+            hold on
+            plot(t_q, error_bits.*(r_t_i), 'r*');
+            hold off
+        
+            if cc_idx + 1 <= num_carriers
+                disp(['Press any key to proceed to carrier = ' num2str(cc_idx+1) ' of ' num2str(num_carriers)]);
+
+            else
+                disp('Press any key to run PSD simulation...')
+            end
+            pause(pause_time)
+        end % for cc_idx
+        pause(pause_time)
+    end % for noise_amplitude
+    
+
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    % PSD simulaion
+    subplot(4,3,[9 12])
+    plot(0,0)
+    title('Running QPSK PSD Simulation...')
+    pause(1)
+    f0 = R;
+    % fs = f0*spb;
+    % fc = fs/4;       % carrier frequency
+    wc = 2*pi*fc;
+    B = f0 * (1+r)/2;
+    
+    psf_avg = zeros(1, round((2*kt*Tb+N*Tb-Tb)/(Tb/spb)));
+    % figure()
+    disp('running PSD simulation...')
+    
+    cos_func = zeros(num_carriers, length(samp_t));
+    sin_func = zeros(num_carriers, length(samp_t));
+    
+    for cc_idx=1:num_carriers
+        fc = fc0 + (cc_idx-1)*carr_spacing;
+        wc = 2*pi*fc;
+    
+        cos_func(cc_idx, :) = cos(wc.*t_i + pi/2);
+        sin_func(cc_idx, :) = sin(wc.*t_q + pi/2);
+    end
+        
+    for p = 2:2
+        num_trials = 10^(p+1)/2;
+    
+        for i = 1:num_trials
+            s_t = zeros(1,length(samp_m));
+            for cc_idx=1:num_carriers
+                % reconstructing the message signal
+                fc = fc0 + (cc_idx-1)*carr_spacing;
+                wc = 2*pi*fc;
+    
+                [mq_t, t_q, ak_q, bits_q] = form_baseband_rrcro(N, f0, spb, kt, r, A_bb);
+                [mi_t, t_i, ak_i, bits_i] = form_baseband_rrcro(N, f0, spb, kt, r, A_bb);
+                s_t = s_t+mi_t.*cos_func(cc_idx,:) - mq_t.*sin_func(cc_idx,:);
+            end
+    
+            Sf = fft(s_t);
+            Sf = Sf * Tb/spb;
+            Sf = fftshift(Sf);    
+            ls = length(Sf);
+            fs = f0*spb;
+            f = (-ls/2:ls/2-1)/ls*fs;
+            
+            psf = abs(Sf).^2 ./ (N * Tb);
+            psf_avg = psf_avg + psf;
+        end
+        psf_avg = psf_avg / num_trials;
+        
+        subplot(4,3,[9 12])
+        semilogy(f, psf_avg)
+        title(['4-carrier QPSK w/ R-RCRO Pulse PSD, ' num2str(num_trials) ' trials'])
+        xlabel('f (Hz)')
+        ylabel('Ps(f)')
+        
+        psf_theor = 0 * .25 * A_bb^2 * Tb * (r_rcro_tfr(f-fc, B, r) + r_rcro_tfr(f+fc, B, r));
+        for cc_idx=1:num_carriers
+            % reconstructing the message signal
+            fc = fc0 + (cc_idx-1)*carr_spacing;     %update for OFDM spacing
+     
+            psf_theor = psf_theor + 2 * .25 * A_bb^2 * Tb * (r_rcro_tfr(f-fc, B, r) + r_rcro_tfr(f+fc, B, r));
+        end
+        hold on
+        semilogy(f, psf_theor)
+        hold off
+        legend('Simulation','Theoretical')
+    
+    end
+    pause(.5)
+
+
+
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    % BER Simulation
+    
+    start_ebno = -40;
+    end_ebno   = 20;
+    delta_ebno = 2;
+    num_trials  = (end_ebno-start_ebno)/delta_ebno + 1;
+    
+    ebn0_trials = zeros(1, num_trials);
+    ber_trials  = zeros(1, num_trials);
+    
+    fs = (1/(Tb/spb));
+    eb = Tb*A_bb^2 *  (1/2);
+    ebno_list = start_ebno:delta_ebno:end_ebno;
+    sigma_list = sqrt(eb./(10.^(ebno_list./10)) .* fs ./ 2);
+    r_t = 0
+    
+    disp('running eb/n0 simulation...')
+    tic
+    for t_idx = 1:avg_trials
+        noise = randn(size(mq_t(1,:)));
+        ebno_idx = 1;
+        s_t = zeros(1, length(samp_t));
+
+        % create the signals
+        for cc_idx=1:num_carriers
+            fc = fc0 + (cc_idx-1)*carr_spacing;     %update for OFDM spacing
+            wc = 2*pi*fc;
+            % two different signals, random
+            [mq_t(cc_idx, :), t_q, ak_q, bits_q(cc_idx, :)] = form_baseband_rrcro(N, R, spb, kt, r, A_bb);
+            [mi_t(cc_idx, :), t_i, ak_i, bits_i(cc_idx, :)] = form_baseband_rrcro(N, R, spb, kt, r, A_bb);
+
+            s_t = s_t+(-mq_t(cc_idx, :).*sin_func(cc_idx, :) + mi_t(cc_idx, :).*cos_func(cc_idx, :));
+        end
+
+        for ebno = ebno_list
+            % reconstructing the message signal
+            bit_errors = 0;
+            sigma = sigma_list(ebno_idx);
+
+            r_t = s_t + sigma.*noise;
+
+            for cc_idx=1:num_carriers
+                fc = fc0 + (cc_idx-1)*carr_spacing;     %update for OFDM spacing
+                wc = 2*pi*fc;
+            
+                f_low = fc - carr_spacing/2;
+                f_high = fc + carr_spacing/2;
+
+                r_t_carr = bandpass(r_t, [f_low f_high], fs);
+            
+                r_t_i = r_t_carr .* cos_func(cc_idx, :);
+                r_t_i = conv(r_t_i, rrcro_conv, 'same');
+            
+                r_t_q = -r_t_carr .* sin_func(cc_idx, :);
+                r_t_q = conv(r_t_q, rrcro_conv, 'same');
+            
+    
+                % Q channel
+                bits_recovered = (abs(bits_q(cc_idx,:)).*r_t_q>0) + -1*(abs(bits_q(cc_idx,:)).*r_t_q<0);
+                bits_recovered(abs(bits_recovered)~=1) = nan;
+                bit_errors = bit_errors + sum((bits_q(cc_idx,:) ~= bits_recovered) & ~isnan(bits_recovered));
+                
+                % I channel
+                bits_recovered = (abs(bits_i(cc_idx,:)).*r_t_i>0) + -1*(abs(bits_i(cc_idx,:)).*r_t_i<0);
+                bits_recovered(abs(bits_recovered)~=1) = nan;
+                bit_errors = bit_errors + sum(bits_i(cc_idx,:) ~= bits_recovered & ~isnan(bits_recovered));
+            end
+
+            
+            ber = bit_errors / (N*num_carriers*2)
+        
+            ebn0_trials(ebno_idx) = ebno;
+            ber_trials(ebno_idx) = ber_trials(ebno_idx) + ber;
+            ebno_idx = ebno_idx + 1;
+        end
+        t_idx
+    end
+    time = toc;
+        
+    ber_trials = ber_trials/avg_trials;
+    
+    tot_ber_trials(spacing_idx, :) = ber_trials;
+    % expected_ber = qfunc(sqrt(2*10.^(ebn0_trials/10)));
+    expected_ber = qfunc(sqrt(2*10.^(ebn0_trials/10)));
+    
+    subplot(4,3,[7 10])
+%     semilogy(ebn0_trials, expected_ber, 'DisplayName', 'Expected')
+%     hold on
+    for i=1:spacing_idx
+        semilogy(ebn0_trials, tot_ber_trials(i, :), 'DisplayName', ['Observed, spacing = ' num2str((10-delta_spacing*(i-1))/10)])
+        hold on
+    end
+    spacing_idx = spacing_idx + 1;
+    hold off
+    legend show
+    xlabel('Eb/N0')
+    ylabel('Pe')
+    title(['Pe vs Eb/No for ' int2str(avg_trials) ' trials with ' int2str(N) ' points in ' int2str(time) 's'])
+%     pause
+end %carrier spacing loop
